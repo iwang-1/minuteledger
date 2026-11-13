@@ -69,3 +69,21 @@ class WindowTests(unittest.TestCase):
                 total, count = expected.get(bucket, (0,0))
                 expected[bucket] = (total+value, count+1)
         self.assertEqual({r["start"]:(r["total"],r["count"]) for r in self.ledger.changes() if r["count"]}, expected)
+
+    def test_slow_registered_source_holds_back_finality_after_restart(self):
+        path = self.path.with_name("multi")
+        ledger = Ledger(path, sources=["fast", "slow"])
+        ledger.ingest("fast", 0, {"watermark": 300})
+        ledger = Ledger(path)
+        ledger.ingest("slow", 0, dict(id="a", version=1, ts=8, value=9))
+        self.assertEqual(ledger.changes(), [])
+        ledger.ingest("slow", 1, {"watermark": 60})
+        self.assertEqual(ledger.changes()[0]["status"], "published")
+        with self.assertRaises(ValueError):
+            ledger.ingest("slow", 2, {"watermark": 50})
+        ledger.ingest("slow", 2, {"watermark": 300})
+        self.assertEqual(ledger.changes()[-1]["status"], "final")
+        with self.assertRaises(ValueError):
+            ledger.ingest("unknown", 0, {"watermark": 400})
+        with self.assertRaises(ValueError):
+            Ledger(path, sources=["fast"])

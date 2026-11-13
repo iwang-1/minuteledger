@@ -7,9 +7,12 @@ from pathlib import Path
 
 
 class Ledger:
-    def __init__(self, path, width=60, grace=120):
+    def __init__(self, path, width=60, grace=120, sources=None):
         if type(width) != int or type(grace) != int or width < 1 or grace < 0:
             raise ValueError("invalid window or grace")
+        if sources is not None and (not sources or any(not isinstance(v, str) or not v for v in sources)
+                                    or len(set(sources)) != len(sources)):
+            raise ValueError("expected distinct, nonempty source names")
         self.path, self.width, self.grace = Path(path), width, grace
         with closing(sqlite3.connect(path)) as db, db:
             db.execute("PRAGMA journal_mode=WAL")
@@ -19,8 +22,17 @@ class Ledger:
                 CREATE TABLE IF NOT EXISTS windows(start INTEGER PRIMARY KEY, total INTEGER, count INTEGER, revision INTEGER);
                 CREATE TABLE IF NOT EXISTS changes(seq INTEGER PRIMARY KEY, start INTEGER, total INTEGER, count INTEGER,
                     revision INTEGER, status TEXT);
+                CREATE TABLE IF NOT EXISTS source_watermarks(source TEXT PRIMARY KEY, watermark INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS cursors(source TEXT PRIMARY KEY, offset INTEGER);
                 """)
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT 1 FROM config").fetchone()
+            if sources is not None:
+                if not existing:
+                    db.executemany("INSERT INTO source_watermarks VALUES(?,-1)", [(v,) for v in sources])
+                stored = {r[0] for r in db.execute("SELECT source FROM source_watermarks")}
+                if stored != set(sources):
+                    raise ValueError("source membership differs from stored settings")
             db.execute("INSERT OR IGNORE INTO config VALUES(1,?,?,-1)", (width, grace))
             if db.execute("SELECT width,grace FROM config").fetchone() != (width, grace):
                 raise ValueError("window configuration differs from stored settings")
@@ -87,6 +99,9 @@ class Ledger:
             raise ValueError("invalid source position")
         with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            registered = db.execute("SELECT watermark FROM source_watermarks WHERE source=?", (source,)).fetchone()
+            if registered is None and db.execute("SELECT 1 FROM source_watermarks LIMIT 1").fetchone():
+                raise ValueError("unregistered source")
             row = db.execute("SELECT offset FROM cursors WHERE source=?", (source,)).fetchone()
             previous = row[0] if row else -1
             if offset <= previous:
@@ -95,7 +110,13 @@ class Ledger:
                 raise ValueError("source offset gap")
             watermark, = db.execute("SELECT watermark FROM config").fetchone()
             if set(item) == {"watermark"}:
-                result = self.advance(db, watermark, item["watermark"])
+                value = item["watermark"]
+                if registered is not None:
+                    if type(value) != int or not registered[0] <= value <= 2**53:
+                        raise ValueError("source watermark regressed or exceeded its bounds")
+                    db.execute("UPDATE source_watermarks SET watermark=? WHERE source=?", (value, source))
+                    value = db.execute("SELECT MIN(watermark) FROM source_watermarks").fetchone()[0]
+                result = self.advance(db, watermark, value)
             elif set(item) == {"id", "version", "ts", "value"}:
                 result = self.reading(db, item, watermark)
             else:
@@ -114,6 +135,7 @@ def main():
     cli.add_argument("--db", default="ledger.sqlite")
     cli.add_argument("--width", type=int, default=60)
     cli.add_argument("--grace", type=int, default=120)
+    cli.add_argument("--source-member", action="append", help="declare a member of a fixed source group")
     sub = cli.add_subparsers(dest="cmd", required=True)
     read = sub.add_parser("ingest")
     read.add_argument("source")
@@ -122,7 +144,7 @@ def main():
     changes.add_argument("--after", type=int, default=0)
     args = cli.parse_args()
     try:
-        ledger = Ledger(args.db, args.width, args.grace)
+        ledger = Ledger(args.db, args.width, args.grace, args.source_member)
         if args.cmd == "ingest":
             with args.file.open() as stream:
                 for offset, line in enumerate(stream):
