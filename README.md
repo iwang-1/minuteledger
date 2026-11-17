@@ -1,6 +1,15 @@
 # MinuteLedger
 
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/) [![dependencies: standard library only](https://img.shields.io/badge/dependencies-stdlib_only-brightgreen)](#)
+
 A local stream processor for measurements that can be corrected after a window has already been published. It keeps a durable changelog of window sums and counts. Consumers checkpoint a sequence number and apply newer revisions by window start.
+
+## At a glance
+
+- **Late corrections done right.** Timestamp moves, deletions and late data emit revised window snapshots; once a window is final, a correction is rejected atomically.
+- **Differential-tested:** **600** seeded updates match an independent offline computation exactly.
+- **Crash-tested:** **40** trials, each crashing twice before chosen database writes, all recover to output identical to an uninterrupted run.
+- Per-source watermarks that survive restarts, and a replayable changelog for downstream consumers.
 
 ## Reproduce a correction
 
